@@ -118,7 +118,7 @@ module Kitchen
       def download_path(remote, local, connection)
         return if remote.nil?
 
-        connection.download_path!(local, remote)
+        connection.download_path!(remote, local)
       rescue SSHFailed, Net::SSH::Exception => ex
         raise ActionFailed, ex.message
       end
