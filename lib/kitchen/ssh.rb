@@ -67,7 +67,7 @@ module Kitchen
         }
       end
 
-      session.scp.download!(remote, local, options, &progress)
+      session.scp.download!(remote, local, options) #, &progress)
     end
 
     def download_path!(remote, local, options = {}, &progress)
