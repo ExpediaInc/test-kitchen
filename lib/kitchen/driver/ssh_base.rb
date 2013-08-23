@@ -59,7 +59,7 @@ module Kitchen
         Kitchen::SSH.new(*build_ssh_args(state)) do |conn|
           run_remote(busser_sync_cmd, conn)
           run_remote(busser_run_cmd, conn)
-          download_path(config[:download_results], "results", conn) if config[:download_results]
+          download_path!(config[:download_results], "results", conn) if config[:download_results]
         end
       end
 
