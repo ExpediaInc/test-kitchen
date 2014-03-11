@@ -17,7 +17,12 @@
 # limitations under the License.
 
 require 'fileutils'
+require 'pathname'
 require 'json'
+
+require 'kitchen/provisioner/chef/berkshelf'
+require 'kitchen/provisioner/chef/librarian'
+require 'kitchen/util'
 
 module Kitchen
 
@@ -28,74 +33,157 @@ module Kitchen
     # @author Fletcher Nichol <fnichol@nichol.ca>
     class ChefBase < Base
 
-      def install_command
-        return nil unless config[:require_chef_omnibus]
+      default_config :require_chef_omnibus, true
+      default_config :chef_omnibus_url, "https://www.getchef.com/chef/install.sh"
+      default_config :run_list, []
+      default_config :attributes, {}
+      default_config :cookbook_files_glob, %w[README.* metadata.{json,rb}
+        attributes/**/* definitions/**/* files/**/* libraries/**/*
+        providers/**/* recipes/**/* resources/**/* templates/**/*].join(",")
 
-        url = "https://www.opscode.com/chef/install.sh"
+      default_config :data_path do |provisioner|
+        provisioner.calculate_path("data")
+      end
+      expand_path_for :data_path
+
+      default_config :data_bags_path do |provisioner|
+        provisioner.calculate_path("data_bags")
+      end
+      expand_path_for :data_bags_path
+
+      default_config :environments_path do |provisioner|
+        provisioner.calculate_path("environments")
+      end
+      expand_path_for :environments_path
+
+      default_config :nodes_path do |provisioner|
+        provisioner.calculate_path("nodes")
+      end
+      expand_path_for :nodes_path
+
+      default_config :roles_path do |provisioner|
+        provisioner.calculate_path("roles")
+      end
+      expand_path_for :roles_path
+
+      default_config :clients_path do |provisioner|
+        provisioner.calculate_path("clients")
+      end
+      expand_path_for :clients_path
+
+      default_config :encrypted_data_bag_secret_key_path do |provisioner|
+        provisioner.calculate_path("encrypted_data_bag_secret_key", :file)
+      end
+      expand_path_for :encrypted_data_bag_secret_key_path
+
+      def install_command
+        return unless config[:require_chef_omnibus]
+
+        url = config[:chef_omnibus_url]
         flag = config[:require_chef_omnibus]
         version = if flag.is_a?(String) && flag != "latest"
-          "-s -- -v #{flag.downcase}"
+          "-v #{flag.downcase}"
         else
           ""
         end
 
+        # use Bourne (/bin/sh) as Bash does not exist on all Unix flavors
         <<-INSTALL.gsub(/^ {10}/, '')
-          bash -c '
+          sh -c '
+          #{Util.shell_helpers}
+
           should_update_chef() {
             case "#{flag}" in
-              true|$(chef-solo -v | cut -d " " -f 2)) return 1 ;;
+              true|`chef-solo -v | cut -d " " -f 2`) return 1 ;;
               latest|*) return 0 ;;
             esac
           }
 
           if [ ! -d "/opt/chef" ] || should_update_chef ; then
-            PATH=/usr/local/sbin:/usr/local/bin:/sbin:/bin:/usr/sbin:/usr/bin
-            export PATH
             echo "-----> Installing Chef Omnibus (#{flag})"
-            if command -v wget >/dev/null ; then
-              wget #{url} -O - | #{sudo('bash')} #{version}
-            elif command -v curl >/dev/null ; then
-              curl -sSL #{url} | #{sudo('bash')} #{version}
-            else
-              echo ">>>>>> Neither wget nor curl found on this instance."
-              exit 16
-            fi
+            do_download #{url} /tmp/install.sh
+            #{sudo('sh')} /tmp/install.sh #{version}
           fi'
         INSTALL
       end
 
       def init_command
-        "#{sudo('rm')} -rf #{home_path}"
+        dirs = %w{cookbooks data data_bags environments roles clients}.
+          map { |dir| File.join(config[:root_path], dir) }.join(" ")
+        "#{sudo('rm')} -rf #{dirs} ; mkdir -p #{config[:root_path]}"
       end
 
-      def cleanup_sandbox
-        return if tmpdir.nil?
-
-        debug("Cleaning up local sandbox in #{tmpdir}")
-        FileUtils.rmtree(tmpdir)
+      def create_sandbox
+        super
+        prepare_json
+        prepare_cache
+        prepare_cookbooks
+        prepare_data
+        prepare_data_bags
+        prepare_environments
+        prepare_nodes
+        prepare_roles
+        prepare_clients
+        prepare_secret
       end
 
       protected
 
-      def create_chef_sandbox
-        @tmpdir = Dir.mktmpdir("#{instance.name}-sandbox-")
-        debug("Creating local sandbox in #{tmpdir}")
+      def load_needed_dependencies!
+        if File.exists?(berksfile)
+          debug("Berksfile found at #{berksfile}, loading Berkshelf")
+          Chef::Berkshelf.load!(logger)
+        elsif File.exists?(cheffile)
+          debug("Cheffile found at #{cheffile}, loading Librarian-Chef")
+          Chef::Librarian.load!(logger)
+        end
+      end
 
-        yield if block_given?
-        prepare_json
-        prepare_data_bags
-        prepare_roles
-        prepare_nodes
-        prepare_secret
-        prepare_cache
-        prepare_cookbooks
-        tmpdir
+      def format_config_file(data)
+        data.each.map { |attr, value|
+          [attr, (value.is_a?(Array) ? value.to_s : %{"#{value}"})].join(" ")
+        }.join("\n")
+      end
+
+      def default_config_rb
+        root = config[:root_path]
+
+        {
+          :node_name        => instance.name,
+          :checksum_path    => "#{root}/checksums",
+          :file_cache_path  => "#{root}/cache",
+          :file_backup_path => "#{root}/backup",
+          :cookbook_path    => ["#{root}/cookbooks", "#{root}/site-cookbooks"],
+          :data_bag_path    => "#{root}/data_bags",
+          :environment_path => "#{root}/environments",
+          :node_path        => "#{root}/nodes",
+          :role_path        => "#{root}/roles",
+          :client_path      => "#{root}/clients",
+          :user_path        => "#{root}/users",
+          :validation_key   => "#{root}/validation.pem",
+          :client_key       => "#{root}/client.pem",
+          :chef_server_url  => "http://127.0.0.1:8889",
+          :encrypted_data_bag_secret => "#{root}/encrypted_data_bag_secret",
+        }
       end
 
       def prepare_json
-        File.open(File.join(tmpdir, "dna.json"), "wb") do |file|
-          file.write(instance.dna.to_json)
+        dna = config[:attributes].merge({ :run_list => config[:run_list] })
+
+        File.open(File.join(sandbox_path, "dna.json"), "wb") do |file|
+          file.write(dna.to_json)
         end
+      end
+
+      def prepare_data
+        return unless data
+
+        info("Preparing data")
+        debug("Using data from #{data}")
+
+        tmpdata_dir = File.join(sandbox_path, "data")
+        FileUtils.mkdir_p(tmpdata_dir)
+        FileUtils.cp_r(Dir.glob("#{data}/*"), tmpdata_dir)
       end
 
       def prepare_data_bags
@@ -104,7 +192,7 @@ module Kitchen
         info("Preparing data bags")
         debug("Using data bags from #{data_bags}")
 
-        tmpbags_dir = File.join(tmpdir, "data_bags")
+        tmpbags_dir = File.join(sandbox_path, "data_bags")
         FileUtils.mkdir_p(tmpbags_dir)
         FileUtils.cp_r(Dir.glob("#{data_bags}/*"), tmpbags_dir)
       end
@@ -115,9 +203,20 @@ module Kitchen
         info("Preparing roles")
         debug("Using roles from #{roles}")
 
-        tmproles_dir = File.join(tmpdir, "roles")
+        tmproles_dir = File.join(sandbox_path, "roles")
         FileUtils.mkdir_p(tmproles_dir)
         FileUtils.cp_r(Dir.glob("#{roles}/*"), tmproles_dir)
+      end
+
+      def prepare_clients
+        return unless clients
+
+        info("Preparing clients")
+        debug("Using roles from #{clients}")
+
+        tmpclients_dir = File.join(sandbox_path, "clients")
+        FileUtils.mkdir_p(tmpclients_dir)
+        FileUtils.cp_r(Dir.glob("#{clients}/*"), tmpclients_dir)
       end
 
       def prepare_nodes
@@ -126,9 +225,20 @@ module Kitchen
         info("Preparing nodes")
         debug("Using nodes from #{nodes}")
 
-        tmpnodes_dir = File.join(tmpdir, "nodes")
+        tmpnodes_dir = File.join(sandbox_path, "nodes")
         FileUtils.mkdir_p(tmpnodes_dir)
         FileUtils.cp_r(Dir.glob("#{nodes}/*"), tmpnodes_dir)
+      end
+
+      def prepare_environments
+        return unless environments
+
+        info("Preparing environments")
+        debug("Using environments from #{environments}")
+
+        tmpenvs_dir = File.join(sandbox_path, "environments")
+        FileUtils.mkdir_p(tmpenvs_dir)
+        FileUtils.cp_r(Dir.glob("#{environments}/*"), tmpenvs_dir)
       end
 
       def prepare_secret
@@ -137,11 +247,11 @@ module Kitchen
         info("Preparing encrypted data bag secret")
         debug("Using secret from #{secret}")
 
-        FileUtils.cp_r(secret, File.join(tmpdir, "encrypted_data_bag_secret"))
+        FileUtils.cp_r(secret, File.join(sandbox_path, "encrypted_data_bag_secret"))
       end
 
       def prepare_cache
-        FileUtils.mkdir_p(File.join(tmpdir, "cache"))
+        FileUtils.mkdir_p(File.join(sandbox_path, "cache"))
       end
 
       def prepare_cookbooks
@@ -154,69 +264,83 @@ module Kitchen
         elsif File.exists?(metadata_rb)
           cp_this_cookbook
         else
-          FileUtils.rmtree(tmpdir)
-          fatal("Berksfile, Cheffile, cookbooks/, or metadata.rb" +
-            " must exist in #{kitchen_root}")
-          raise UserError, "Cookbooks could not be found"
+          make_fake_cookbook
         end
 
         filter_only_cookbook_files
       end
 
       def filter_only_cookbook_files
-        info("Removing non-cookbook files in sandbox")
-
-        all_files = Dir.glob(File.join(tmpbooks_dir, "**/*")).
-          select { |fn| File.file?(fn) }
-        cookbook_files = Dir.glob(File.join(tmpbooks_dir, cookbook_files_glob)).
-          select { |fn| File.file?(fn) }
-
-        FileUtils.rm(all_files - cookbook_files)
+        info("Removing non-cookbook files before transfer")
+        FileUtils.rm(all_files_in_cookbooks - only_cookbook_files)
       end
 
-      def cookbook_files_glob
-        files = %w{README.* metadata.{json,rb}
-          attributes/**/* definitions/**/* files/**/* libraries/**/*
-          providers/**/* recipes/**/* resources/**/* templates/**/*
-        }
+      def all_files_in_cookbooks
+        Dir.glob(File.join(tmpbooks_dir, "**/*"), File::FNM_DOTMATCH).
+          select { |fn| File.file?(fn) && ! %w{. ..}.include?(fn) }
+      end
 
-        "*/{#{files.join(',')}}"
+      def only_cookbook_files
+        glob = File.join(tmpbooks_dir, "*", "{#{config[:cookbook_files_glob]}}")
+
+        Dir.glob(glob, File::FNM_DOTMATCH).
+          select { |fn| File.file?(fn) && ! %w{. ..}.include?(fn) }
       end
 
       def berksfile
-        File.join(kitchen_root, "Berksfile")
+        File.join(config[:kitchen_root], "Berksfile")
       end
 
       def cheffile
-        File.join(kitchen_root, "Cheffile")
+        File.join(config[:kitchen_root], "Cheffile")
       end
 
       def metadata_rb
-        File.join(kitchen_root, "metadata.rb")
+        File.join(config[:kitchen_root], "metadata.rb")
       end
 
       def cookbooks_dir
-        File.join(kitchen_root, "cookbooks")
+        File.join(config[:kitchen_root], "cookbooks")
+      end
+
+      def site_cookbooks_dir
+        File.join(config[:kitchen_root], "site-cookbooks")
       end
 
       def data_bags
-        instance.suite.data_bags_path
+        config[:data_bags_path]
       end
 
       def roles
-        instance.suite.roles_path
+        config[:roles_path]
+      end
+
+      def clients
+        config[:clients_path]
       end
 
       def nodes
-        instance.suite.nodes_path
+        config[:nodes_path]
+      end
+
+      def data
+        config[:data_path]
+      end
+
+      def environments
+        config[:environments_path]
       end
 
       def secret
-        instance.suite.encrypted_data_bag_secret_key_path
+        config[:encrypted_data_bag_secret_key_path]
       end
 
       def tmpbooks_dir
-        File.join(tmpdir, "cookbooks")
+        File.join(sandbox_path, "cookbooks")
+      end
+
+      def tmpsitebooks_dir
+        File.join(sandbox_path, "cookbooks")
       end
 
       def cp_cookbooks
@@ -225,7 +349,17 @@ module Kitchen
 
         FileUtils.mkdir_p(tmpbooks_dir)
         FileUtils.cp_r(File.join(cookbooks_dir, "."), tmpbooks_dir)
+
+        cp_site_cookbooks if File.directory?(site_cookbooks_dir)
         cp_this_cookbook if File.exists?(metadata_rb)
+      end
+
+      def cp_site_cookbooks
+        info("Preparing site-cookbooks from project directory")
+        debug("Using cookbooks from #{site_cookbooks_dir}")
+
+        FileUtils.mkdir_p(tmpsitebooks_dir)
+        FileUtils.cp_r(File.join(site_cookbooks_dir, "."), tmpsitebooks_dir)
       end
 
       def cp_this_cookbook
@@ -237,52 +371,33 @@ module Kitchen
             " Please add: `name '<cookbook_name>'` to metadata.rb and retry")
 
         cb_path = File.join(tmpbooks_dir, cb_name)
-        glob = Dir.glob("#{kitchen_root}/{metadata.rb,README.*,definitions," +
-          "attributes,files,libraries,providers,recipes,resources,templates}")
+
+        glob = Dir.glob("#{config[:kitchen_root]}/**")
 
         FileUtils.mkdir_p(cb_path)
         FileUtils.cp_r(glob, cb_path)
       end
 
-      def resolve_with_berkshelf
-        info("Resolving cookbook dependencies with Berkshelf")
-        debug("Using Berksfile from #{berksfile}")
-
-        begin
-          require 'berkshelf'
-        rescue LoadError
-          fatal("The `berkself' gem is missing and must be installed." +
-            " Run `gem install berkshelf` or add the following " +
-            "to your Gemfile if you are using Bundler: `gem 'berkshelf'`.")
-          raise UserError, "Could not load Berkshelf"
+      def make_fake_cookbook
+        info("Berksfile, Cheffile, cookbooks/, or metadata.rb not found " +
+          "so Chef will run with effectively no cookbooks. Is this intended?")
+        name = File.basename(config[:kitchen_root])
+        fake_cb = File.join(tmpbooks_dir, name)
+        FileUtils.mkdir_p(fake_cb)
+        File.open(File.join(fake_cb, "metadata.rb"), "wb") do |file|
+          file.write(%{name "#{name}\n"})
         end
+      end
 
+      def resolve_with_berkshelf
         Kitchen.mutex.synchronize do
-          Berkshelf::Berksfile.from_file(berksfile).
-            install(:path => tmpbooks_dir)
+          Chef::Berkshelf.new(berksfile, tmpbooks_dir, logger).resolve
         end
       end
 
       def resolve_with_librarian
-        info("Resolving cookbook dependencies with Librarian-Chef")
-        debug("Using Cheffile from #{cheffile}")
-
-        begin
-          require 'librarian/chef/environment'
-          require 'librarian/action/resolve'
-          require 'librarian/action/install'
-        rescue LoadError
-          fatal("The `librarian-chef' gem is missing and must be installed." +
-            " Run `gem install librarian-chef` or add the following " +
-            "to your Gemfile if you are using Bundler: `gem 'librarian-chef'`.")
-          raise UserError, "Could not load Librarian-Chef"
-        end
-
         Kitchen.mutex.synchronize do
-          env = Librarian::Chef::Environment.new(:project_path => kitchen_root)
-          env.config_db.local["path"] = tmpbooks_dir
-          Librarian::Action::Resolve.new(env).run
-          Librarian::Action::Install.new(env).run
+          Chef::Librarian.new(cheffile, tmpbooks_dir, logger).resolve
         end
       end
     end

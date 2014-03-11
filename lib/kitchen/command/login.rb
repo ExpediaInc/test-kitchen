@@ -16,29 +16,26 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+require 'kitchen/command'
+
 module Kitchen
 
-  # A class to manage actors.
-  #
-  # @author Fletcher Nichol <fnichol@nichol.ca>
-  class Manager
+  module Command
 
-    include Celluloid
+    # Command to log into to instance.
+    #
+    # @author Fletcher Nichol <fnichol@nichol.ca>
+    class Login < Kitchen::Command::Base
 
-    trap_exit :actor_died
+      def call
+        results = parse_subcommand(args.first)
+        if results.size > 1
+          die "Argument `#{args.first}' returned multiple results:\n" +
+            results.map { |i| "  * #{i.name}" }.join("\n")
+        end
+        instance = results.pop
 
-    # Terminate all actors that are linked.
-    def stop
-      Array(links.to_a).map { |actor| actor.terminate if actor.alive? }
-    end
-
-    private
-
-    def actor_died(actor, reason)
-      if reason.nil?
-        Kitchen.logger.debug("Actor terminated cleanly")
-      else
-        Kitchen.logger.debug("An actor crashed due to #{reason.inspect}")
+        instance.login
       end
     end
   end

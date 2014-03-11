@@ -16,6 +16,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+gem 'minitest'
+
 require 'simplecov'
 SimpleCov.adapters.define 'gem' do
   command_name 'Specs'
@@ -31,13 +33,7 @@ SimpleCov.start 'gem'
 require 'fakefs/safe'
 require 'minitest/autorun'
 require 'mocha/setup'
-
-# enable yaml symbol parsing if code is executing under guard
-if ENV['GUARD_NOTIFY']
-  require 'safe_yaml'
-  YAML.enable_symbol_parsing!
-  SafeYAML::OPTIONS[:suppress_warnings] = true
-end
+require 'tempfile'
 
 # Nasty hack to redefine IO.read in terms of File#read for fakefs
 class IO

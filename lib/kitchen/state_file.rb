@@ -16,7 +16,12 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-require 'safe_yaml'
+if RUBY_VERSION <= "1.9.3"
+  # ensure that Psych and not Syck is used for Ruby 1.9.2
+  require 'yaml'
+  YAML::ENGINE.yamler = 'psych'
+end
+require 'safe_yaml/load'
 
 module Kitchen
 
@@ -67,6 +72,16 @@ module Kitchen
       FileUtils.rm_f(file_name) if File.exists?(file_name)
     end
 
+    # Returns a Hash of configuration and other useful diagnostic information.
+    #
+    # @return [Hash] a diagnostic hash
+    def diagnose
+      raw = read
+      result = Hash.new
+      raw.keys.sort.each { |k| result[k] = raw[k] }
+      result
+    end
+
     private
 
     attr_reader :file_name
@@ -76,7 +91,7 @@ module Kitchen
     end
 
     def deserialize_string(string)
-      ::YAML.safe_load(string)
+      SafeYAML.load(string)
     rescue SyntaxError, Psych::SyntaxError => ex
       raise StateFileLoadError, "Error parsing #{file_name} (#{ex.message})"
     end

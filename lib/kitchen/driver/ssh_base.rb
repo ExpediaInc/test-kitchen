@@ -36,12 +36,14 @@ module Kitchen
       end
 
       def converge(state)
-        provisioner = new_provisioner
+        provisioner = instance.provisioner
+        provisioner.create_sandbox
+        sandbox_dirs = Dir.glob("#{provisioner.sandbox_path}/*")
 
         Kitchen::SSH.new(*build_ssh_args(state)) do |conn|
           run_remote(provisioner.install_command, conn)
           run_remote(provisioner.init_command, conn)
-          transfer_path(provisioner.create_sandbox, provisioner.home_path, conn)
+          transfer_path(sandbox_dirs, provisioner[:root_path], conn)
           run_remote(provisioner.prepare_command, conn)
           run_remote(provisioner.run_command, conn)
         end
@@ -79,19 +81,15 @@ module Kitchen
 
       protected
 
-      def new_provisioner
-        combined = config.dup
-        combined[:log_level] = Util.from_logger_level(logger.level)
-        Provisioner.for_plugin(combined[:provisioner], instance, combined)
-      end
-
       def build_ssh_args(state)
-        combined = config.merge(state)
+        combined = config.to_hash.merge(state)
 
         opts = Hash.new
         opts[:user_known_hosts_file] = "/dev/null"
         opts[:paranoid] = false
+        opts[:keys_only] = true if combined[:ssh_key]
         opts[:password] = combined[:password] if combined[:password]
+        opts[:forward_agent] = combined[:forward_agent] if combined.key? :forward_agent
         opts[:port] = combined[:port] if combined[:port]
         opts[:keys] = Array(combined[:ssh_key]) if combined[:ssh_key]
         opts[:logger] = logger
@@ -124,15 +122,17 @@ module Kitchen
       end
 
       def transfer_path(local, remote, connection)
-        return if local.nil?
+        return if locals.nil? || Array(locals).empty?
 
-        connection.upload_path!(local, remote)
+        info("Transferring files to #{instance.to_str}")
+        locals.each { |local| connection.upload_path!(local, remote) }
+        debug("Transfer complete")
       rescue SSHFailed, Net::SSH::Exception => ex
         raise ActionFailed, ex.message
       end
 
       def wait_for_sshd(hostname, username = nil, options = {})
-        SSH.new(hostname, username, options).wait
+        SSH.new(hostname, username, { :logger => logger }.merge(options)).wait
       end
     end
   end

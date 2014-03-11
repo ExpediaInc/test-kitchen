@@ -37,6 +37,12 @@ module Kitchen
           Gemfile
         D
 
+      class_option :provisioner, :type => :string, :aliases => "-P",
+        :default => "chef_solo",
+        :desc => <<-D.gsub(/^\s+/, '').gsub(/\n/, ' ')
+          The default Kitchen Provisioner to use
+        D
+
       class_option :create_gemfile, :type => :boolean, :default => false,
         :desc => <<-D.gsub(/^\s+/, '').gsub(/\n/, ' ')
           Whether or not to create a Gemfile if one does not exist.
@@ -50,8 +56,10 @@ module Kitchen
         prepare_rakefile if init_rakefile?
         prepare_thorfile if init_thorfile?
         empty_directory "test/integration/default" if init_test_dir?
-        append_to_gitignore(".kitchen/")
-        append_to_gitignore(".kitchen.local.yml")
+        if init_git?
+          append_to_gitignore(".kitchen/")
+          append_to_gitignore(".kitchen.local.yml")
+        end
         prepare_gemfile if init_gemfile?
         add_drivers
 
@@ -68,11 +76,12 @@ module Kitchen
         else
           nil
         end
-        run_list = cookbook_name ? "recipe[#{cookbook_name}]" : nil
+        run_list = cookbook_name ? "recipe[#{cookbook_name}::default]" : nil
         driver_plugin = Array(options[:driver]).first || 'dummy'
 
         template("kitchen.yml.erb", ".kitchen.yml", {
           :driver_plugin => driver_plugin.sub(/^kitchen-/, ''),
+          :provisioner => options[:provisioner],
           :run_list => Array(run_list)
         })
       end
@@ -94,6 +103,10 @@ module Kitchen
 
       def init_test_dir?
         Dir.glob("test/integration/*").select { |d| File.directory?(d) }.empty?
+      end
+
+      def init_git?
+        File.directory?(File.join(destination_root, '.git'))
       end
 
       def prepare_rakefile
@@ -142,9 +155,8 @@ module Kitchen
       end
 
       def add_gem_to_gemfile
-        if not_in_file?("Gemfile", %r{gem 'test-kitchen'})
-          append_to_file("Gemfile",
-            %{gem 'test-kitchen', :group => :integration\n})
+        if not_in_file?("Gemfile", %r{gem ('|")test-kitchen('|")})
+          append_to_file("Gemfile", %{gem 'test-kitchen'\n})
           @display_bundle_msg = true
         end
       end
@@ -163,9 +175,8 @@ module Kitchen
       end
 
       def add_driver_to_gemfile(driver_gem)
-        if not_in_file?("Gemfile", %r{gem '#{driver_gem}'})
-          append_to_file("Gemfile",
-            %{gem '#{driver_gem}', :group => :integration\n})
+        if not_in_file?("Gemfile", %r{gem ('|")#{driver_gem}('|")})
+          append_to_file("Gemfile", %{gem '#{driver_gem}'\n})
           @display_bundle_msg = true
         end
       end

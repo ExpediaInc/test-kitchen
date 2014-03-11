@@ -16,9 +16,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-require 'celluloid'
-require 'vendor/hash_recursive_merge'
-
 module Kitchen
 
   # Base configuration class for Kitchen. This class exposes configuration such
@@ -27,237 +24,136 @@ module Kitchen
   # @author Fletcher Nichol <fnichol@nichol.ca>
   class Config
 
-    attr_accessor :kitchen_root
-    attr_accessor :test_base_path
+    attr_reader :kitchen_root
+    attr_reader :log_root
+    attr_reader :test_base_path
+    attr_reader :loader
     attr_accessor :log_level
-    attr_writer :supervised
-    attr_writer :platforms
-    attr_writer :suites
-
-    # Default driver plugin to use
-    DEFAULT_DRIVER_PLUGIN = "dummy".freeze
-
-    # Default provisioner to use
-    DEFAULT_PROVISIONER = "chef_solo".freeze
 
     # Creates a new configuration.
     #
     # @param [Hash] options configuration
     # @option options [#read] :loader
     # @option options [String] :kitchen_root
+    # @option options [String] :log_root
     # @option options [String] :test_base_path
     # @option options [Symbol] :log_level
-    # @option options [TrueClass,FalseClass] :supervised
     def initialize(options = {})
-      @loader         = options[:loader] || Kitchen::Loader::YAML.new
-      @kitchen_root   = options[:kitchen_root] || Dir.pwd
-      @test_base_path = options[:test_base_path] || default_test_base_path
-      @log_level      = options[:log_level] || Kitchen::DEFAULT_LOG_LEVEL
-      @supervised     = options[:supervised]
+      @loader         = options.fetch(:loader) { Kitchen::Loader::YAML.new }
+      @kitchen_root   = options.fetch(:kitchen_root) { Dir.pwd }
+      @log_level      = options.fetch(:log_level) { Kitchen::DEFAULT_LOG_LEVEL }
+      @log_root       = options.fetch(:log_root) { default_log_root }
+      @test_base_path = options.fetch(:test_base_path) { default_test_base_path }
+    end
+
+    # @return [Array<Instance>] all instances, resulting from all platform and
+    #   suite combinations
+    def instances
+      @instances ||= Collection.new(build_instances)
     end
 
     # @return [Array<Platform>] all defined platforms which will be used in
     #   convergence integration
     def platforms
       @platforms ||= Collection.new(
-        Array(data[:platforms]).map { |hash| new_platform(hash) })
+        data.platform_data.map { |pdata| Platform.new(pdata) })
     end
 
     # @return [Array<Suite>] all defined suites which will be used in
     #   convergence integration
     def suites
       @suites ||= Collection.new(
-        Array(data[:suites]).map { |hash| new_suite(hash) })
-    end
-
-    # @return [Array<Instance>] all instances, resulting from all platform and
-    #   suite combinations
-    def instances
-      @instances ||= build_instances
-    end
-
-    # Returns an InstanceActor for all instance names matched by the regexp,
-    # or all by default.
-    #
-    # @param [Regexp] a regular expression to match on instance names
-    # @return [Array<InstanceActor>] all instance actors matching the regexp
-    def instance_actors(regexp = nil)
-      result = regexp.nil? ? instances : instances.get_all(regexp)
-      Collection.new(result.map { |instance| actor_registry(instance) })
-    end
-
-    def supervised
-      @supervised.nil? ? @supervised = true : @supervised
+        data.suite_data.map { |sdata| Suite.new(sdata) })
     end
 
     private
 
-    def new_suite(hash)
-      path_hash = {
-        :data_bags_path => calculate_path("data_bags", hash[:name], hash[:data_bags_path]),
-        :roles_path     => calculate_path("roles", hash[:name], hash[:roles_path]),
-        :nodes_path     => calculate_path("nodes", hash[:name], hash[:nodes_path]),
-      }
-
-      Suite.new(hash.rmerge(path_hash))
-    end
-
-    def new_platform(hash)
-      Platform.new(hash)
-    end
-
-    def new_driver(hash)
-      hash[:driver_config] ||= Hash.new
-      hash[:driver_config][:kitchen_root] = kitchen_root
-      hash[:driver_config][:provisioner] = hash[:provisioner]
-
-      Driver.for_plugin(hash[:driver_plugin], hash[:driver_config])
-    end
-
     def build_instances
-      results = []
-      filtered_instances = suites.product(platforms).delete_if do |arr|
-        arr[0].excludes.include?(arr[1].name)
-      end
-      filtered_instances.each_with_index do |arr, index|
-        results << new_instance(arr[0], arr[1], index)
-      end
-      Collection.new(results)
-    end
-
-    def new_instance(suite, platform, index)
-      platform_hash = platform_driver_hash(platform.name)
-      driver = new_driver(merge_driver_hash(platform_hash))
-      provisioner = driver[:provisioner]
-
-      instance = Instance.new(
-        :suite    => extend_suite(suite, provisioner),
-        :platform => extend_platform(platform, provisioner),
-        :driver   => driver,
-        :logger   => new_instance_logger(index)
-      )
-      extend_instance(instance, provisioner)
-    end
-
-    def extend_suite(suite, provisioner)
-      case provisioner.to_s.downcase
-      when /^chef_/ then suite.dup.extend(Suite::Cheflike)
-      when /^puppet_/ then suite.dup.extend(Suite::Puppetlike)
-      else suite.dup
-      end
-    end
-
-    def extend_platform(platform, provisioner)
-      case provisioner.to_s.downcase
-      when /^chef_/ then platform.dup.extend(Platform::Cheflike)
-      else platform.dup
-      end
-    end
-
-    def extend_instance(instance, provisioner)
-      case provisioner.to_s.downcase
-      when /^chef_/ then instance.extend(Instance::Cheflike)
-      when /^puppet_/ then instance.extend(Instance::Puppetlike)
-      else instance
-      end
-    end
-
-    def actor_registry(instance)
-      Celluloid::Actor[actor_key(instance)] || new_instance_actor(instance)
-    end
-
-    def actor_key(instance)
-      "#{object_id}__#{instance.name}"
-    end
-
-    def new_instance_actor(instance)
-      actor_name = actor_key(instance)
-
-      actor = if supervised
-        supervisor = InstanceActor.supervise_as(actor_name, instance)
-        actor = supervisor.actors.first
-        Kitchen.logger.debug("Supervising #{actor.to_str} with #{supervisor}")
-        actor
-      else
-        Celluloid::Actor[actor_name] = InstanceActor.new(instance)
-      end
-
-      manager.link(actor)
-
-      actor
-    end
-
-    def manager
-      @manager ||= Manager.new
-    end
-
-    def log_root
-      File.expand_path(File.join(kitchen_root, ".kitchen", "logs"))
-    end
-
-    def platform_driver_hash(platform_name)
-      h = data[:platforms].find { |p| p[:name] == platform_name } || Hash.new
-
-      h.select do |key, value|
-        [:driver_plugin, :driver_config, :provisioner].include?(key)
-      end
-    end
-
-    def new_instance_logger(index)
-      level = Util.to_logger_level(self.log_level)
-      color = Color::COLORS[index % Color::COLORS.size].to_sym
-
-      lambda do |name|
-        logfile = File.join(log_root, "#{name}.log")
-
-        Logger.new(:stdout => STDOUT, :color => color, :logdev => logfile,
-          :level => level, :progname => name)
+      filter_instances.map.with_index do |(suite, platform), index|
+        new_instance(suite, platform, index)
       end
     end
 
     def data
-      @data ||= @loader.read
+      @data ||= DataMunger.new(loader.read, kitchen_config)
     end
 
-    def merge_driver_hash(driver_hash)
-      default_driver_hash.rmerge(common_driver_hash.rmerge(driver_hash))
-    end
-
-    def calculate_path(path, suite_name, local_path)
-      custom_path     = File.join(kitchen_root, local_path) if local_path
-      suite_path      = File.join(test_base_path, suite_name, path)
-      common_path     = File.join(test_base_path, path)
-      top_level_path  = File.join(Dir.pwd, path)
-
-      if custom_path and File.directory?(custom_path)
-        custom_path
-      elsif File.directory?(suite_path)
-        suite_path
-      elsif File.directory?(common_path)
-        common_path
-      elsif File.directory?(top_level_path)
-        top_level_path
-      else
-        nil
-      end
-    end
-
-    def default_driver_hash
-      {
-        :driver_plugin  => DEFAULT_DRIVER_PLUGIN,
-        :driver_config  => {},
-        :provisioner    => DEFAULT_PROVISIONER
-      }
-    end
-
-    def common_driver_hash
-      data.select do |key, value|
-        [:driver_plugin, :driver_config, :provisioner].include?(key)
-      end
+    def default_log_root
+      File.join(kitchen_root, Kitchen::DEFAULT_LOG_DIR)
     end
 
     def default_test_base_path
-      File.join(kitchen_root, 'test/integration')
+      File.join(kitchen_root, Kitchen::DEFAULT_TEST_DIR)
+    end
+
+    def filter_instances
+      suites.product(platforms).select do |suite, platform|
+        if !suite.includes.empty?
+          suite.includes.include?(platform.name)
+        elsif !suite.excludes.empty?
+          !suite.excludes.include?(platform.name)
+        else
+          true
+        end
+      end
+    end
+
+    def instance_name(suite, platform)
+      Instance.name_for(suite, platform)
+    end
+
+    def kitchen_config
+      @kitchen_config ||= {
+        :defaults => {
+          :driver       => Driver::DEFAULT_PLUGIN,
+          :provisioner  => Provisioner::DEFAULT_PLUGIN
+        },
+        :kitchen_root   => kitchen_root,
+        :test_base_path => test_base_path,
+        :log_level      => log_level,
+      }
+    end
+
+    def new_busser(suite, platform)
+      bdata = data.busser_data_for(suite.name, platform.name)
+      Busser.new(suite.name, bdata)
+    end
+
+    def new_driver(suite, platform)
+      ddata = data.driver_data_for(suite.name, platform.name)
+      Driver.for_plugin(ddata[:name], ddata)
+    end
+
+    def new_instance(suite, platform, index)
+      Instance.new(
+        :busser       => new_busser(suite, platform),
+        :driver       => new_driver(suite, platform),
+        :logger       => new_logger(suite, platform, index),
+        :suite        => suite,
+        :platform     => platform,
+        :provisioner  => new_provisioner(suite, platform),
+        :state_file   => new_state_file(suite, platform)
+      )
+    end
+
+    def new_logger(suite, platform, index)
+      name = instance_name(suite, platform)
+      Logger.new(
+        :stdout   => STDOUT,
+        :color    => Color::COLORS[index % Color::COLORS.size].to_sym,
+        :logdev   => File.join(log_root, "#{name}.log"),
+        :level    => Util.to_logger_level(self.log_level),
+        :progname => name
+      )
+    end
+
+    def new_provisioner(suite, platform)
+      pdata = data.provisioner_data_for(suite.name, platform.name)
+      Provisioner.for_plugin(pdata[:name], pdata)
+    end
+
+    def new_state_file(suite, platform)
+      StateFile.new(kitchen_root, instance_name(suite, platform))
     end
   end
 end

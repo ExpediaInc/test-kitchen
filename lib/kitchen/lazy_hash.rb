@@ -20,23 +20,31 @@ require 'delegate'
 
 module Kitchen
 
-  # A delegator for Instance which adds Celluloid actor support, boom.
+  # A modifed Hash object that may contain procs as a value which must be
+  # executed in the context of another object.
   #
   # @author Fletcher Nichol <fnichol@nichol.ca>
-  class InstanceActor < SimpleDelegator
+  class LazyHash < SimpleDelegator
 
-    include Celluloid
+    def initialize(obj, context)
+      @context = context
+      super(obj)
+    end
 
-    # @!method actor_name()
-    #   Returns the name of the Celluloid actor.
-    #   @return [String] the actor name
-    alias_method :actor_name, :name
+    def [](key)
+      proc_or_val = __getobj__[key]
 
-    # Returns the name of the underlying instance.
-    #
-    # @return [String] the instance name
-    def name
-      __getobj__.name
+      if proc_or_val.respond_to?(:call)
+        proc_or_val.call(@context)
+      else
+        proc_or_val
+      end
+    end
+
+    def to_hash
+      hash = Hash.new
+      __getobj__.keys.each { |key| hash[key] = self[key] }
+      hash
     end
   end
 end
