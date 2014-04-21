@@ -3,6 +3,7 @@ Feature: Add Test Kitchen support to an existing project
   As an operator
   I want to run a command to initialize my project
 
+  @spawn
   Scenario: Displaying help
     When I run `kitchen help init`
     Then the output should contain:
@@ -12,15 +13,21 @@ Feature: Add Test Kitchen support to an existing project
     """
     And the exit status should be 0
 
+  @spawn
   Scenario: Running init with default values
     Given a sandboxed GEM_HOME directory named "kitchen-init"
+    And I have a git repository
     When I run `kitchen init`
     Then the exit status should be 0
     And a directory named ".kitchen" should exist
     And a directory named "test/integration/default" should exist
     And the file ".gitignore" should contain ".kitchen/"
     And the file ".gitignore" should contain ".kitchen.local.yml"
-    And the file ".kitchen.yml" should contain "driver_plugin: vagrant"
+    And the file ".kitchen.yml" should contain:
+    """
+    driver:
+      name: vagrant
+    """
     And a file named "Gemfile" should not exist
     And a file named "Rakefile" should not exist
     And a file named "Thorfile" should not exist
@@ -34,11 +41,63 @@ Feature: Add Test Kitchen support to an existing project
     And the output should contain "You must run `bundle install'"
 
   Scenario: Running init with an existing Gemfile appends to the Gemfile
-    Given an empty file named "Gemfile"
+    Given a file named "Gemfile" with:
+    """
+    source "https://rubygems.org"
+
+
+    """
     When I successfully run `kitchen init`
-    And the file "Gemfile" should contain "gem 'test-kitchen'"
-    And the file "Gemfile" should contain "gem 'kitchen-vagrant'"
+    Then the file "Gemfile" should contain exactly:
+    """
+    source "https://rubygems.org"
+
+    gem 'test-kitchen'
+    gem 'kitchen-vagrant'
+
+    """
     And the output should contain "You must run `bundle install'"
+
+  Scenario: Running init with a Gemfile containing test-kitchen does not
+    re-append
+    Given a file named "Gemfile" with:
+    """
+    source "https://rubygems.org"
+
+    gem "test-kitchen"
+
+    """
+    When I successfully run `kitchen init`
+    Then the file "Gemfile" should contain exactly:
+    """
+    source "https://rubygems.org"
+
+    gem "test-kitchen"
+    gem 'kitchen-vagrant'
+
+    """
+    And the output should contain "You must run `bundle install'"
+
+  Scenario: Running init with a Gemfile containing the driver gem does not
+    re-append
+    Given a file named "Gemfile" with:
+    """
+    source "https://rubygems.org"
+
+    gem "test-kitchen"
+    gem "kitchen-ec2"
+
+    """
+    When I successfully run `kitchen init --driver=kitchen-ec2`
+    Then the file "Gemfile" should contain exactly:
+    """
+    source "https://rubygems.org"
+
+    gem "test-kitchen"
+    gem "kitchen-ec2"
+
+    """
+    And the output should not contain "You must run `bundle install'"
 
   Scenario: Running init with multiple drivers appends to the Gemfile
     Given an empty file named "Gemfile"
@@ -51,13 +110,40 @@ Feature: Add Test Kitchen support to an existing project
     first driver given
     Given an empty file named "Gemfile"
     When I successfully run `kitchen init --driver=kitchen-bluebox kitchen-wakka`
-    Then the file ".kitchen.yml" should contain "driver_plugin: bluebox"
+    Then the file ".kitchen.yml" should contain:
+    """
+    driver:
+      name: bluebox
+    """
 
   Scenario: Running init with no drivers sets the plugin_driver to the
     dummy driver
     Given an empty file named "Gemfile"
     When I successfully run `kitchen init --no-driver`
-    Then the file ".kitchen.yml" should contain "driver_plugin: dummy"
+    Then the file ".kitchen.yml" should contain:
+    """
+    driver:
+      name: dummy
+    """
+
+  Scenario: Running init without a provisioner sets the default provisioner
+    to chef_solo in .kitchen.yml
+    Given an empty file named "Gemfile"
+    When I successfully run `kitchen init --no-driver`
+    Then the file ".kitchen.yml" should contain:
+    """
+    provisioner:
+      name: chef_solo
+    """
+
+  Scenario: Running init with a provisioner sets the provisioner in .kitchen.yml
+    Given an empty file named "Gemfile"
+    When I successfully run `kitchen init --no-driver --provisioner=chef_zero`
+    Then the file ".kitchen.yml" should contain:
+    """
+    provisioner:
+      name: chef_zero
+    """
 
   Scenario: Running with a Rakefile file appends Kitchen tasks
     Given an empty file named "Gemfile"
@@ -73,6 +159,11 @@ Feature: Add Test Kitchen support to an existing project
     end
     """
 
+  Scenario: Running without git doesn't make a .gitignore
+    When I successfully run `kitchen init`
+    Then the exit status should be 0
+    And a file named ".gitignore" should not exist
+
   Scenario: Running with a Thorfile file appends Kitchen tasks
     Given an empty file named "Gemfile"
     Given an empty file named "Thorfile"
@@ -87,7 +178,7 @@ Feature: Add Test Kitchen support to an existing project
     end
     """
 
-  Scenario: Running init with a the name attribute metadata.rb sets a run list
+  Scenario: Running init with a name in metadata.rb sets a run list
     Given an empty file named "Gemfile"
     Given a file named "metadata.rb" with:
     """
@@ -100,10 +191,23 @@ Feature: Add Test Kitchen support to an existing project
     support "centos"
     """
     When I successfully run `kitchen init`
-    Then the file ".kitchen.yml" should contain:
+    Then the file ".kitchen.yml" should contain exactly:
     """
+    ---
+    driver:
+      name: vagrant
+
+    provisioner:
+      name: chef_solo
+
+    platforms:
+      - name: ubuntu-12.04
+      - name: centos-6.4
+
     suites:
-    - name: default
-      run_list: ["recipe[ntp]"]
-      attributes: {}
+      - name: default
+        run_list:
+          - recipe[ntp::default]
+        attributes:
+
     """

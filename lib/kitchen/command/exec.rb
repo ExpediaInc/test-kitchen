@@ -1,8 +1,8 @@
 # -*- encoding: utf-8 -*-
 #
-# Author:: Fletcher Nichol (<fnichol@nichol.ca>)
+# Author:: SAWANOBORI Yukihiko (<sawanoboriyu@higanworks.com>)
 #
-# Copyright (C) 2013, Fletcher Nichol
+# Copyright (C) 2014, HiganWorks LLC
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -16,29 +16,24 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+require 'kitchen/command'
+
 module Kitchen
 
-  # A class to manage actors.
-  #
-  # @author Fletcher Nichol <fnichol@nichol.ca>
-  class Manager
+  module Command
 
-    include Celluloid
+    # Execute command on remote instance.
+    #
+    # @author SAWANOBORI Yukihiko (<sawanoboriyu@higanworks.com>)
+    class Exec < Kitchen::Command::Base
 
-    trap_exit :actor_died
+      def call
+        results = parse_subcommand(args.first)
 
-    # Terminate all actors that are linked.
-    def stop
-      Array(links.to_a).map { |actor| actor.terminate if actor.alive? }
-    end
-
-    private
-
-    def actor_died(actor, reason)
-      if reason.nil?
-        Kitchen.logger.debug("Actor terminated cleanly")
-      else
-        Kitchen.logger.debug("An actor crashed due to #{reason.inspect}")
+        results.each do |instance|
+          banner "Execute command on #{instance.name}."
+          instance.remote_exec(options['command'])
+        end
       end
     end
   end

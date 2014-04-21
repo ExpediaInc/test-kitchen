@@ -2,7 +2,7 @@
 #
 # Author:: Fletcher Nichol (<fnichol@nichol.ca>)
 #
-# Copyright (C) 2012, Fletcher Nichol
+# Copyright (C) 2012, 2013, Fletcher Nichol
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -33,14 +33,57 @@ module Kitchen
     # @param [String] suite_name name of suite on which to operate
     #   (**Required**)
     # @param [Hash] opts optional configuration
-    # @option opts [TrueClass, FalseClass] :use_sudo whether or not to invoke
+    # @option opts [String] :kitchen_root local path to the root of the project
+    # @option opts [String] :instance_ruby_bindir path to the directory
+    #   containing the Ruby binary on the remote instance
+    # @option opts [TrueClass, FalseClass] :sudo whether or not to invoke
     #   sudo before commands requiring root access (default: `true`)
     def initialize(suite_name, opts = {})
       validate_options(suite_name)
 
-      @test_root = opts.fetch(:test_root, DEFAULT_TEST_ROOT)
-      @suite_name = suite_name
-      @use_sudo = opts.fetch(:use_sudo, true)
+      kitchen_root = opts.fetch(:kitchen_root) { Dir.pwd }
+      test_base_path = opts.fetch(:test_base_path, Kitchen::DEFAULT_TEST_DIR)
+
+      @config = Hash.new
+      @config[:kitchen_root] = kitchen_root
+      @config[:test_base_path] = File.expand_path(test_base_path, kitchen_root)
+      @config[:suite_name] = suite_name
+      @config[:sudo] = opts.fetch(:sudo, true)
+      @config[:ruby_bindir] = opts.fetch(:ruby_bindir, DEFAULT_RUBY_BINDIR)
+      @config[:root_path] = opts.fetch(:root_path, DEFAULT_ROOT_PATH)
+      @config[:version] = opts.fetch(:version, "busser")
+      @config[:busser_bin] = opts.fetch(:busser_bin, File.join(@config[:root_path], "bin/busser"))
+    end
+
+    # Returns the name of this busser, suitable for display in a CLI.
+    #
+    # @return [String] name of this busser
+    def name
+      config[:suite_name]
+    end
+
+    # Returns an array of configuration keys.
+    #
+    # @return [Array] array of configuration keys
+    def config_keys
+      config.keys
+    end
+
+    # Provides hash-like access to configuration keys.
+    #
+    # @param attr [Object] configuration key
+    # @return [Object] value at configuration key
+    def [](attr)
+      config[attr]
+    end
+
+    # Returns a Hash of configuration and other useful diagnostic information.
+    #
+    # @return [Hash] a diagnostic hash
+    def diagnose
+      result = Hash.new
+      config_keys.sort.each { |k| result[k] = config[k] }
+      result
     end
 
     # Returns a command string which installs Busser, and installs all
@@ -55,14 +98,17 @@ module Kitchen
       @setup_cmd ||= if local_suite_files.empty?
         nil
       else
-        <<-INSTALL_CMD.gsub(/^ {10}/, '')
-          bash -c '
-          if ! #{sudo}#{ruby_binpath}/gem list busser -i >/dev/null ; then
-            #{sudo}#{ruby_binpath}/gem install #{busser_gem} --no-rdoc --no-ri
-          fi
-          #{sudo}#{ruby_binpath}/busser setup
-          #{sudo}#{busser_bin} plugin install #{plugins.join(' ')}'
-        INSTALL_CMD
+        setup_cmd  = []
+        setup_cmd << busser_setup_env
+        setup_cmd << "if ! #{sudo}#{config[:ruby_bindir]}/gem list busser -i >/dev/null"
+        setup_cmd << "then #{sudo}#{config[:ruby_bindir]}/gem install #{gem_install_args}"
+        setup_cmd << "fi"
+        setup_cmd << "gem_bindir=`#{config[:ruby_bindir]}/ruby -rrubygems -e \"puts Gem.bindir\"`"
+        setup_cmd << "#{sudo}${gem_bindir}/busser setup"
+        setup_cmd << "#{sudo}#{config[:busser_bin]} plugin install #{plugins.join(' ')}"
+
+        # use Bourne (/bin/sh) as Bash does not exist on all Unix flavors
+        "sh -c '#{setup_cmd.join('; ')}'"
       end
     end
 
@@ -78,12 +124,14 @@ module Kitchen
       @sync_cmd ||= if local_suite_files.empty?
         nil
       else
-        <<-INSTALL_CMD.gsub(/^ {10}/, '')
-          bash -c '
-          #{sudo}#{busser_bin} suite cleanup
-          #{local_suite_files.map { |f| stream_file(f, remote_file(f, @suite_name)) }.join}
-          #{helper_files.map { |f| stream_file(f, remote_file(f, "helpers")) }.join}'
-        INSTALL_CMD
+        sync_cmd  = []
+        sync_cmd << busser_setup_env
+        sync_cmd << "#{sudo}#{config[:busser_bin]} suite cleanup"
+        sync_cmd << "#{local_suite_files.map { |f| stream_file(f, remote_file(f, config[:suite_name])) }.join("; ")}"
+        sync_cmd << "#{helper_files.map { |f| stream_file(f, remote_file(f, "helpers")) }.join("; ")}"
+
+        # use Bourne (/bin/sh) as Bash does not exist on all Unix flavors
+        "sh -c '#{sync_cmd.join('; ')}'"
       end
     end
 
@@ -95,16 +143,24 @@ module Kitchen
     # @return [String] a command string to run the test suites, or nil if no
     #   work needs to be performed
     def run_cmd
-      @run_cmd ||= local_suite_files.empty? ? nil : "#{sudo}#{busser_bin} test"
+      @run_cmd ||= if local_suite_files.empty?
+        nil
+      else
+        run_cmd  = []
+        run_cmd << busser_setup_env
+        run_cmd << "#{sudo}#{config[:busser_bin]} test"
+
+        # use Bourne (/bin/sh) as Bash does not exist on all Unix flavors
+        "sh -c '#{run_cmd.join('; ')}'"
+      end
     end
 
     private
 
-    DEFAULT_RUBY_BINPATH = "/opt/chef/embedded/bin".freeze
-    DEFAULT_BUSSER_ROOT = "/opt/busser".freeze
-    DEFAULT_TEST_ROOT = File.join(Dir.pwd, "test/integration").freeze
+    DEFAULT_RUBY_BINDIR = "/opt/chef/embedded/bin".freeze
+    DEFAULT_ROOT_PATH = "/tmp/busser".freeze
 
-    attr_reader :test_root
+    attr_reader :config
 
     def validate_options(suite_name)
       if suite_name.nil?
@@ -118,24 +174,31 @@ module Kitchen
     end
 
     def plugins
-      Dir.glob(File.join(test_root, @suite_name, "*")).select { |d|
-        File.directory?(d) && File.basename(d) != "data_bags"
+      glob = File.join(config[:test_base_path], config[:suite_name], "*")
+      Dir.glob(glob).reject { |d|
+        ! File.directory?(d) || non_suite_dirs.include?(File.basename(d))
       }.map { |d| "busser-#{File.basename(d)}" }.sort.uniq
     end
 
     def local_suite_files
-      Dir.glob(File.join(test_root, @suite_name, "*/**/*")).reject do |f|
-        f["data_bags"] || File.directory?(f)
+      base = File.join(config[:test_base_path], config[:suite_name])
+      glob = File.join(base, "*/**/*")
+      Dir.glob(glob).reject do |f|
+         is_chef_data_dir?(base, f) || File.directory?(f)
       end
     end
 
+    def is_chef_data_dir?(base, file)
+      file =~ %r[^#{base}/(data|data_bags|environments|nodes|roles)/]
+    end
+
     def helper_files
-      Dir.glob(File.join(test_root, "helpers", "*/**/*"))
+      Dir.glob(File.join(config[:test_base_path], "helpers", "*/**/*")).reject { |f| File.directory?(f) }
     end
 
     def remote_file(file, dir)
-      local_prefix = File.join(test_root, dir)
-      "$(#{sudo}#{busser_bin} suite path)/".concat(file.sub(%r{^#{local_prefix}/}, ''))
+      local_prefix = File.join(config[:test_base_path], dir)
+      "$(#{sudo}#{config[:busser_bin]} suite path)/".concat(file.sub(%r{^#{local_prefix}/}, ''))
     end
 
     def stream_file(local_path, remote_path)
@@ -143,35 +206,45 @@ module Kitchen
       md5 = Digest::MD5.hexdigest(local_file)
       perms = sprintf("%o", File.stat(local_path).mode)[2, 4]
       stream_cmd = [
-        "#{sudo}#{busser_bin}",
+        "#{sudo}#{config[:busser_bin]}",
         "deserialize",
         "--destination=#{remote_path}",
         "--md5sum=#{md5}",
         "--perms=#{perms}"
       ].join(" ")
 
-      <<-STREAMFILE.gsub(/^ {8}/, '')
-        echo "Uploading #{remote_path} (mode=#{perms})"
-        #{sudo}cat <<"__EOFSTREAM__" | #{sudo}#{stream_cmd}
-        #{Base64.encode64(local_file)}
-        __EOFSTREAM__
-      STREAMFILE
+      stream_file_cmd  = []
+      stream_file_cmd << %{echo "Uploading #{remote_path} (mode=#{perms})"}
+      stream_file_cmd << %{echo "#{Base64.encode64(local_file).gsub("\n", '')}" | #{sudo}#{stream_cmd}}
+      stream_file_cmd.join('; ')
     end
 
     def sudo
-      @use_sudo ? "sudo -E " : ""
+      config[:sudo] ? "sudo -E " : ""
     end
 
-    def ruby_binpath
-      DEFAULT_RUBY_BINPATH
+    def non_suite_dirs
+      %w{data data_bags environments nodes roles}
     end
 
-    def busser_bin
-      File.join(DEFAULT_BUSSER_ROOT, "bin/busser")
+    def busser_setup_env
+      [
+        %{BUSSER_ROOT="#{config[:root_path]}"},
+        %{GEM_HOME="#{config[:root_path]}/gems"},
+        %{GEM_PATH="#{config[:root_path]}/gems"},
+        %{GEM_CACHE="#{config[:root_path]}/gems/cache"},
+        %{; export BUSSER_ROOT GEM_HOME GEM_PATH GEM_CACHE}
+      ].join(" ")
     end
 
-    def busser_gem
-      "busser"
+    def gem_install_args
+      gem, version = config[:version].split("@")
+      gem, version = "busser", gem if gem =~ /^\d+\.\d+\.\d+/
+
+      args = gem
+      args += " --version #{version}" if version
+      args += " --no-rdoc --no-ri"
+      args
     end
   end
 end

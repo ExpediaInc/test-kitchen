@@ -80,7 +80,7 @@ module Kitchen
       if progress.nil?
         progress = lambda { |ch, name, sent, total|
           if sent == total
-            logger.info("Uploaded #{name} (#{total} bytes)")
+            logger.debug("Uploaded #{name} (#{total} bytes)")
           end
         }
       end
@@ -110,7 +110,9 @@ module Kitchen
     def login_command
       args  = %W{ -o UserKnownHostsFile=/dev/null }
       args += %W{ -o StrictHostKeyChecking=no }
+      args += %W{ -o IdentitiesOnly=yes } if options[:keys]
       args += %W{ -o LogLevel=#{logger.debug? ? "VERBOSE" : "ERROR"} }
+      args += %W{ -o ForwardAgent=#{options[:forward_agent] ? "yes" : "no"} } if options.key? :forward_agent
       Array(options[:keys]).each { |ssh_key| args += %W{ -i #{ssh_key}} }
       args += %W{ -p #{port}}
       args += %W{ #{username}@#{hostname}}
@@ -123,9 +125,28 @@ module Kitchen
     attr_reader :hostname, :username, :options, :logger
 
     def session
-      @session ||= begin
+      @session ||= establish_connection
+    end
+
+    def establish_connection
+      rescue_exceptions = [
+        Errno::EACCES, Errno::EADDRINUSE, Errno::ECONNREFUSED,
+        Errno::ECONNRESET, Errno::ENETUNREACH, Errno::EHOSTUNREACH,
+        Net::SSH::Disconnect
+      ]
+      retries = 3
+
+      begin
         logger.debug("[SSH] opening connection to #{self}")
         Net::SSH.start(hostname, username, options)
+      rescue *rescue_exceptions => e
+        if (retries -= 1) > 0
+          logger.info("[SSH] connection failed, retrying (#{e.inspect})")
+          retry
+        else
+          logger.warn("[SSH] connection failed, terminating (#{e.inspect})")
+          raise
+        end
       end
     end
 

@@ -16,27 +16,27 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-require 'delegate'
+require 'kitchen/command'
 
 module Kitchen
 
-  # A delegator for Instance which adds Celluloid actor support, boom.
-  #
-  # @author Fletcher Nichol <fnichol@nichol.ca>
-  class InstanceActor < SimpleDelegator
+  module Command
 
-    include Celluloid
-
-    # @!method actor_name()
-    #   Returns the name of the Celluloid actor.
-    #   @return [String] the actor name
-    alias_method :actor_name, :name
-
-    # Returns the name of the underlying instance.
+    # Command to log into to instance.
     #
-    # @return [String] the instance name
-    def name
-      __getobj__.name
+    # @author Fletcher Nichol <fnichol@nichol.ca>
+    class Login < Kitchen::Command::Base
+
+      def call
+        results = parse_subcommand(args.first)
+        if results.size > 1
+          die "Argument `#{args.first}' returned multiple results:\n" +
+            results.map { |i| "  * #{i.name}" }.join("\n")
+        end
+        instance = results.pop
+
+        instance.login
+      end
     end
   end
 end

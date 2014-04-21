@@ -16,7 +16,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-require 'celluloid'
 require 'pathname'
 require 'thread'
 
@@ -32,13 +31,13 @@ require 'kitchen/busser'
 require 'kitchen/color'
 require 'kitchen/collection'
 require 'kitchen/config'
+require 'kitchen/data_munger'
 require 'kitchen/driver'
 require 'kitchen/driver/base'
+require 'kitchen/driver/proxy'
 require 'kitchen/driver/ssh_base'
 require 'kitchen/instance'
-require 'kitchen/instance_actor'
 require 'kitchen/loader/yaml'
-require 'kitchen/manager'
 require 'kitchen/metadata_chopper'
 require 'kitchen/platform'
 require 'kitchen/state_file'
@@ -77,11 +76,6 @@ module Kitchen
       Logger.new(:stdout => STDOUT, :logdev => logfile, :level => env_log)
     end
 
-    def celluloid_file_logger
-      logfile = File.expand_path(File.join(".kitchen", "logs", "celluloid.log"))
-      Logger.new(:logdev => logfile, :level => env_log, :progname => "Celluloid")
-    end
-
     private
 
     def env_log
@@ -92,17 +86,14 @@ module Kitchen
 
   # Default log level verbosity
   DEFAULT_LOG_LEVEL = :info
+
+  DEFAULT_TEST_DIR = "test/integration".freeze
+
+  DEFAULT_LOG_DIR = ".kitchen/logs".freeze
 end
 
-# Initialize the base logger and use that for Celluloid's logger
+# Initialize the base logger
 Kitchen.logger = Kitchen.default_logger
-Celluloid.logger = Kitchen.logger
 
 # Setup a collection of instance crash exceptions for error reporting
-Kitchen.crashes = []
-Celluloid.exception_handler do |exception|
-  Kitchen.logger.debug("An instance crashed because of #{exception.inspect}")
-  Kitchen.mutex.synchronize { Kitchen.crashes << exception }
-end
-
 Kitchen.mutex = Mutex.new
