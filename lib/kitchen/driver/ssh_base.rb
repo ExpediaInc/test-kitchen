@@ -127,7 +127,7 @@ module Kitchen
         raise ActionFailed, ex.message
       end
 
-      def transfer_path(local, remote, connection)
+      def transfer_path(locals, remote, connection)
         return if locals.nil? || Array(locals).empty?
 
         info("Transferring files to #{instance.to_str}")
